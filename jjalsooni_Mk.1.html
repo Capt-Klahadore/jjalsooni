@@ -124,6 +124,14 @@ td.empty-msg{text-align:center;padding:24px;color:var(--text3)}
 ::-webkit-scrollbar-track{background:var(--surface)}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 </style>
+<!-- Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-10W377FC45"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-10W377FC45');
+</script>
 </head>
 <body>
 
@@ -714,11 +722,18 @@ async function m1Process(){
         item.내용='[이미지 직접 보고 입력해주세요]';
 
       }else if(f.type==='application/pdf'){
-        // PDF: 텍스트 추출 후 정규식 파싱
         sb.textContent='PDF 분석 중 ('+(i+1)+'/'+m1.files.length+'): '+f.name;
         const text=await pdfText(f);
-        const parsed=m1ParseOcr(text);
-        if(parsed&&Object.keys(parsed).length) Object.assign(item,parsed);
+        const parsedArr=m1ParseOcr(text);
+        if(parsedArr&&parsedArr.length){
+          // 다중 행: 각각 별도 item으로
+          parsedArr.forEach((parsed,pi)=>{
+            const it=m1EmptyRow(f.name);
+            Object.assign(it,parsed);
+            m1.items.push(it);
+          });
+          continue; // 아래 push 건너뜀
+        }
 
       }else{
         // 엑셀
@@ -751,64 +766,51 @@ async function m1Process(){
 
 
 function m1ParseOcr(text){
-  if(!text||text.length<20) return {};
+  if(!text||text.length<20) return null;
   const g=pats=>{for(const p of pats){try{const m=text.match(p);if(m&&m[1])return m[1].trim();}catch(ex){}}return '';};
 
   const 문서번호=g([/품\s*의\s*번\s*호\s+([0-9]{2}-\S+)/,/([0-9]{2}-지출결의\S+)/]);
-
-  const 지급요청일자=fD(g([
-    /지급요청일자\s+(20\d\d-\d\d-\d\d)/,
-    /시행일자\s+(20\d\d-\d\d-\d\d)/,
-    /작\s*성\s*일\s*자\s+(20\d\d-\d\d-\d\d)/
-  ]))||'';
-
+  const 지급요청일자=fD(g([/지급요청일자\s+(20\d\d-\d\d-\d\d)/,/시행일자\s+(20\d\d-\d\d-\d\d)/,/작\s*성\s*일\s*자\s+(20\d\d-\d\d-\d\d)/]))||'';
   const 기안자=g([/기\s*안\s*자\s+([가-힣]{2,5})/]);
-
   const 기안부서=g([/기\s*안\s*부\s*서\s+([^\n]+)/]).split('\n')[0].trim();
 
-  // 승인자: "결재" 섹션 ~ "작 성 일 자" 사이 모든 이름 중 마지막
-  // 실제 구조: 결재결재... / 26.날짜 / 이름 / 26.날짜 / 이름 / ... / 마지막이름(날짜없음)
+  // 승인자
   let 승인자='';
-  const mBlock=text.match(/결재(?:[\s　]+결재){1,}([\s\S]*?)작\s*성\s*일\s*자/);
-  if(mBlock){
-    const blk=mBlock[1];
-    const names=blk.match(/[가-힣]{2,5}/g)||[];
-    if(names.length) 승인자=names[names.length-1];
-  }
-  // fallback: 하단 서명 "신 준 수   2026-03-27 14:33:21"
-  if(!승인자){
-    const mSig=text.match(/([가-힣]\s[가-힣]\s[가-힣])\s+20\d\d-\d\d-\d\d\s+\d\d:\d\d:\d\d/);
-    if(mSig) 승인자=mSig[1].replace(/\s/g,'');
-  }
+  const mBlock=text.match(/결재(?:\s+결재){1,}([\s\S]*?)작\s*성\s*일\s*자/);
+  if(mBlock){const ns=mBlock[1].match(/[가-힣]{2,5}/g)||[];if(ns.length)승인자=ns[ns.length-1];}
+  if(!승인자){const mSig=text.match(/([가-힣]\s[가-힣]\s[가-힣])\s+20\d\d-\d\d-\d\d\s+\d\d:\d\d:\d\d/);if(mSig)승인자=mSig[1].replace(/\s/g,'');}
 
-  // 지출통장/입금통장: 풀네임 + 약칭 모두 허용, IM뱅크 추가
-  const bankRe=/(신한은행|우리은행|하나은행|국민은행|농협은행|기업은행|산업은행|IM뱅크|카카오뱅크|토스뱅크|케이뱅크|신한|우리|하나|국민|농협|기업|IM)\s*\/\s*([\d\-]{8,25})/g;
+  // 지출통장
+  const bankRe=/(신한은행|우리은행|하나은행|국민은행|농협은행|기업은행|산업은행|IM뱅크|하나|신한|우리|국민|농협|기업|IM)\s*\/\s*([\d\-]{8,25})/g;
   const allAccts=[...text.matchAll(bankRe)].map(m=>m[1]+'/'+m[2].replace(/\s/g,''));
   const uniqAccts=[...new Set(allAccts)];
   const 지출통장=uniqAccts[0]||'';
   const 입금통장=uniqAccts[1]||'';
 
-  // 거래처
-  const 거래처=g([/\d+\s+20\d\d-\d\d-\d\d\s+([가-힣A-Za-z()\s주식회사]{2,25})\s+[\d,]{4,}/]).trim();
+  // 증빙 데이터 행 전체 파싱
+  const rowRe=/(\d+)\s+(20\d\d-\d\d-\d\d)\s+([가-힣A-Za-z()\s주식회사로그디어]{2,30}?)\s+([\d,]{3,})\s+([\d,]{3,})\s+([\d,]+)\s+([^\n]+)/g;
+  const rows=[...text.matchAll(rowRe)];
 
-  // 합계
-  const tot=text.match(/합계\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)/);
-  const 공급대가=tot?pN(tot[1]):0;
-  const 공급가액=tot?pN(tot[2]):0;
-  const 부가세=tot?pN(tot[3]):0;
+  if(!rows.length){
+    // 단일행 fallback
+    const tot=text.match(/합계\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)/);
+    return [{문서번호,지급요청일자,기안자,승인자,기안부서,거래처:'',
+      공급가액:tot?pN(tot[2]):0,부가세:tot?pN(tot[3]):0,공급대가:tot?pN(tot[1]):0,
+      지출통장,입금통장,내용:'',결재여부:'여',분류:기안부서.includes('사업')?'사업비':'본사지출'}];
+  }
 
-  // 내용(적요)
-  let 내용='';
-  const 적요m=text.match(/\d+\s+20\d\d-\d\d-\d\d\s+[가-힣A-Za-z()\s주식]{2,25}\s+[\d,]+\s+[\d,]+\s+[\d,]+\s+([^\n]+)/);
-  if(적요m) 내용=적요m[1].replace(/\[.*?\]/g,'').replace(/\s+[가-힣]{2,15}\s*$/,'').trim();
-
-  // 결재여부
-  const slots=(text.match(/결재(?:\s+결재)*/)?.[0].split('결재').length-1)||1;
-  const signed=mBlock?(mBlock[1].match(/[가-힣]{2,5}/g)||[]).length:0;
-  const 결재여부=signed>=slots?'여':'부';
-
-  const 분류=(기안부서+내용).includes('사업')?'사업비':'본사지출';
-  return{문서번호,지급요청일자,기안자,승인자,기안부서,거래처,공급가액,부가세,공급대가,지출통장,입금통장,내용,결재여부,분류};
+  return rows.map(row=>{
+    const 거래처=row[3].trim();
+    const 공급대가=pN(row[4]),공급가액=pN(row[5]),부가세=pN(row[6]);
+    let 내용=row[7].replace(/\s*\[.*?\]/g,'').replace(/\[\[상세\]\]/g,'').trim();
+    내용=내용.replace(/\s+[가-힣]{2,10}사업부\s*$/,'').trim();
+    // 입금통장: 같은 거래처 계좌번호
+    const 입금통장_행=uniqAccts.find(a=>a!==지출통장)||입금통장;
+    const 분류=내용.includes('사업비')||내용.includes('사업 지출')?'사업비':(내용.includes('본사')||내용.includes('본사지출')?'본사지출':(기안부서.includes('사업')?'사업비':'본사지출'));
+    return{문서번호,지급요청일자,기안자,승인자,기안부서,거래처,
+      공급가액,부가세,공급대가,지출통장,입금통장:입금통장_행,
+      내용,결재여부:'여',분류};
+  });
 }
 
 function m1EmptyRow(src=''){
